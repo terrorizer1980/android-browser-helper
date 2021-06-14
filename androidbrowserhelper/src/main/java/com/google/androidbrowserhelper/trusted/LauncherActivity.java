@@ -34,7 +34,6 @@ import androidx.browser.trusted.sharing.ShareData;
 import androidx.browser.trusted.sharing.ShareTarget;
 import androidx.core.content.ContextCompat;
 
-import com.google.androidbrowserhelper.trusted.ChromeOsSupport;
 import com.google.androidbrowserhelper.trusted.splashscreens.PwaWrapperSplashScreenStrategy;
 
 import org.json.JSONException;
@@ -106,6 +105,9 @@ public class LauncherActivity extends Activity {
     /** We only want to show the update prompt once per instance of this application. */
     private static boolean sChromeVersionChecked;
 
+    /** See comment in onCreate. */
+    private static int sLauncherActivitiesAlive;
+
     private LauncherActivityMetadata mMetadata;
 
     private boolean mBrowserWasLaunched;
@@ -122,6 +124,25 @@ public class LauncherActivity extends Activity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        sLauncherActivitiesAlive++;
+        boolean twaAlreadyRunning = sLauncherActivitiesAlive > 1;
+        boolean intentHasData = getIntent().getData() != null;
+        boolean intentHasShareData = SharingUtils.isShareIntent(getIntent());
+        if (twaAlreadyRunning && !intentHasData && !intentHasShareData) {
+            // If there's another LauncherActivity alive, that means that the TWA is already
+            // running. If we attempt to launch it again, we will trigger a browser navigation. For
+            // the case where an Intent comes in from a BROWSABLE Intent, a notification or with
+            // share data, that is the desired behaviour.
+
+            // However, if the TWA was originally started by a BROWSABLE Intent and the user then
+            // clicks on the Launcher icon, Android launches this Activity anew (instead of just
+            // bringing the Task to the foreground). In this case we don't want to launch the TWA
+            // again and trigger the navigation. Since launching this Activity will have brought the
+            // TWA to the foreground, we can just finish and everything will work fine.
+            finish();
+            return;
+        }
+
         if (restartInNewTask()) {
             finish();
             return;
@@ -132,6 +153,18 @@ public class LauncherActivity extends Activity {
             // the user closed the Trusted Web Activity and ended up here.
             finish();
             return;
+        }
+
+        mMetadata = LauncherActivityMetadata.parse(this);
+
+        if (splashScreenNeeded()) {
+            mSplashScreenStrategy = new PwaWrapperSplashScreenStrategy(this,
+                    mMetadata.splashImageDrawableId,
+                    getColorCompat(mMetadata.splashScreenBackgroundColorId),
+                    getSplashImageScaleType(),
+                    getSplashImageTransformationMatrix(),
+                    mMetadata.splashScreenFadeOutDurationMillis,
+                    mMetadata.fileProviderAuthority);
         }
 
         if (shouldLaunchImmediately()) {
@@ -154,16 +187,12 @@ public class LauncherActivity extends Activity {
      * {@link #shouldLaunchImmediately()} returns {@code false}.
      */
     protected void launchTwa() {
-        mMetadata = LauncherActivityMetadata.parse(this);
-
-        if (splashScreenNeeded()) {
-            mSplashScreenStrategy = new PwaWrapperSplashScreenStrategy(this,
-                    mMetadata.splashImageDrawableId,
-                    getColorCompat(mMetadata.splashScreenBackgroundColorId),
-                    getSplashImageScaleType(),
-                    getSplashImageTransformationMatrix(),
-                    mMetadata.splashScreenFadeOutDurationMillis,
-                    mMetadata.fileProviderAuthority);
+        // When launching asynchronously, developers should check if the Activity is finishing
+        // before calling launchTwa(). We double check the condition here and prevent the launch
+        // if that's the case.
+        if (isFinishing()) {
+            Log.d(TAG, "Aborting launchTwa() as Activity is finishing");
+            return;
         }
 
         CustomTabColorSchemeParams darkModeColorScheme = new CustomTabColorSchemeParams.Builder()
@@ -282,6 +311,9 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+
+        sLauncherActivitiesAlive--;
+
         if (mTwaLauncher != null) {
             mTwaLauncher.destroy();
         }
